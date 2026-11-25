@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "node scripts/copy-pdfjs.mjs"
   },
   "dependencies": {
     "@capacitor/core": "^8.6.2",
@@ -14,6 +15,8 @@
     "@capacitor/share": "^8.0.3",
     "jspdf": "^4.2.1",
     "next": "16.4.6",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.10.38",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
