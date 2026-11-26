@@ -8,6 +8,7 @@ import {
   PageItem,
   Source,
   Tool,
+  cropKey,
   dispSize,
   renderItem,
   translateAnnot,
@@ -86,7 +87,7 @@ export default function PageStage({
       c.getContext("2d")!.drawImage(tmp, 0, 0);
     })().catch(console.error);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [item.id, item.rotation, item.index, item.w, item.h, source, sw]);
+    }, [item.id, item.rotation, item.index, item.w, item.h, cropKey(item), source, sw]);
 
   const pos = (e: { clientX: number; clientY: number }): [number, number] => {
     const r = overlayRef.current!.getBoundingClientRect();

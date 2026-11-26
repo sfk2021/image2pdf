@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import AppNav from "@/components/AppNav";
 import PageStage from "@/components/PageStage";
+import CropEditor from "@/components/CropEditor";
 import SaveDialog from "@/components/SaveDialog";
 import PdfViewer from "@/components/PdfViewer";
 import { getPdfjs } from "@/lib/pdfjs";
@@ -14,15 +15,19 @@ import { uid } from "@/lib/uid";
 import {
   A4,
   Annot,
+  Crop,
   PageItem,
   Source,
   TextAnnot,
   Tool,
+  applyCropToItem,
   buildPdf,
+  cropKey,
   dispSize,
   imageToSource,
   renderItem,
   rotateAnnotCW,
+  rotateCropCW,
 } from "@/lib/pdfEdit";
 import "./editor.css";
 
@@ -49,6 +54,7 @@ const P = {
   highlight:
     "M9 11l-6 6v3h9l3-3 M22 12l-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4",
   cover: "M3 5h18v14H3z",
+  crop: "M6 2v14a2 2 0 0 0 2 2h14 M18 22V8a2 2 0 0 0-2-2H2",
   undo: "M3 7v6h6 M3 13a9 9 0 1 0 3-7.7L3 8",
   redo: "M21 7v6h-6 M21 13a9 9 0 1 1-3-7.7L21 8",
   trash:
@@ -81,6 +87,9 @@ const formatSize = (bytes: number) =>
     ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
     : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 
+// A thumbnail is reused until the page turns or its crop changes
+const thumbKey = (it: PageItem) => `${it.id}:${it.rotation}:${cropKey(it)}`;
+
 type Msg = { kind: "error" | "ok" | "warn"; text: string } | null;
 type Snap = { items: PageItem[]; currentId: string | null };
 type Ready = { bytes: Uint8Array; pages: number; name: string };
@@ -105,6 +114,7 @@ export default function PdfEditor() {
   const [penSize, setPenSize] = useState(0.005);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [textDlg, setTextDlg] = useState<{ id?: string; u: number; v: number; text: string } | null>(null);
+  const [cropOpen, setCropOpen] = useState(false);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [fileName, setFileName] = useState("edited");
   const [loading, setLoading] = useState("");
@@ -117,7 +127,7 @@ export default function PdfEditor() {
   const [msg, setMsg] = useState<Msg>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  // ----- Undo / redo history (covers annotations AND page operations) -----
+  // ----- Undo / redo history (covers annotations, page operations and crops) -----
   const [past, setPast] = useState<Snap[]>([]);
   const [future, setFuture] = useState<Snap[]>([]);
   const itemsRef = useRef<PageItem[]>([]);
@@ -191,7 +201,7 @@ export default function PdfEditor() {
             const vp = page.getViewport({ scale: 1 });
             added.push({
               id: uid(), src: id, index: i, blank: false,
-              w: vp.width, h: vp.height, rotation: 0, annots: [],
+              w: vp.width, h: vp.height, rotation: 0, crop: null, annots: [],
             });
           }
           if (firstOpen && added.length === doc.numPages) {
@@ -202,7 +212,7 @@ export default function PdfEditor() {
           sources.current.set(source.id, source);
           added.push({
             id: uid(), src: source.id, index: 0, blank: false,
-            w, h, rotation: 0, annots: [],
+            w, h, rotation: 0, crop: null, annots: [],
           });
         }
       }
@@ -242,13 +252,13 @@ export default function PdfEditor() {
   }, []);
 
   /* ---------- Thumbnails (rendered one by one) ---------- */
-  const sig = useMemo(() => items.map((i) => `${i.id}:${i.rotation}`).join("|"), [items]);
+  const sig = useMemo(() => items.map(thumbKey).join("|"), [items]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       for (const it of items) {
-        const key = `${it.id}:${it.rotation}`;
+        const key = thumbKey(it);
         if (thumbsRef.current[key]) continue;
         try {
           const c = await renderItem(it, sources.current.get(it.src), 220);
@@ -297,10 +307,11 @@ export default function PdfEditor() {
   function rotatePage() {
     if (!current) return;
     checkpoint();
-    const d = dispSize(current);
+    const d = dispSize(current); // size of the visible (cropped) page
     patch(current.id, (i) => ({
       ...i,
       rotation: (i.rotation + 90) % 360,
+      crop: i.crop ? rotateCropCW(i.crop) : null,
       annots: i.annots.map((a) => rotateAnnotCW(a, d.w, d.h)),
     }));
     setSelectedId(null);
@@ -331,11 +342,23 @@ export default function PdfEditor() {
     checkpoint();
     const blank: PageItem = {
       id: uid(), src: "", index: 0, blank: true,
-      w: A4.w, h: A4.h, rotation: 0, annots: [],
+      w: A4.w, h: A4.h, rotation: 0, crop: null, annots: [],
     };
     const at = idx >= 0 ? idx + 1 : items.length;
     setItems((prev) => [...prev.slice(0, at), blank, ...prev.slice(at)]);
     goTo(blank.id);
+  }
+
+  /* ---------- Crop ---------- */
+  function applyCrop(crop: Crop | null, all: boolean) {
+    if (!current) return;
+    setCropOpen(false);
+    if (!all && cropKey({ crop }) === cropKey(current)) return; // nothing changed
+    checkpoint();
+    setItems((prev) =>
+      prev.map((i) => (all || i.id === current.id ? applyCropToItem(i, crop) : i))
+    );
+    setSelectedId(null);
   }
 
   /* ---------- Annotation operations ---------- */
@@ -426,7 +449,7 @@ export default function PdfEditor() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || textDlg || ready || viewer) return;
+      if (tag === "INPUT" || tag === "TEXTAREA" || textDlg || ready || viewer || cropOpen) return;
       const mod = e.ctrlKey || e.metaKey;
       const k = e.key.toLowerCase();
 
@@ -445,7 +468,7 @@ export default function PdfEditor() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, textDlg, ready, viewer, currentId, past, future]);
+  }, [selectedId, textDlg, ready, viewer, cropOpen, currentId, past, future]);
 
   /* ---------- Save: build the PDF, then ask for a name ---------- */
   async function save() {
@@ -533,7 +556,7 @@ export default function PdfEditor() {
             <h1>Edit a PDF</h1>
             <p>
               Open a PDF from your phone or laptop. Add text, draw or sign, highlight, cover parts,
-              and rearrange pages, then save.
+              crop, and rearrange pages, then save.
             </p>
             <button className="pe-primary" onClick={() => fileInput.current?.click()}>
               Choose a PDF
@@ -589,6 +612,15 @@ export default function PdfEditor() {
                   </button>
                 ))}
                 <span className="pe-sep" />
+                <button
+                  className="pe-tool"
+                  onClick={() => setCropOpen(true)}
+                  disabled={!current}
+                  aria-label="Crop page"
+                >
+                  <Icon d={P.crop} />
+                  <span>Crop</span>
+                </button>
                 <button className="pe-tool" onClick={undo} disabled={!past.length} aria-label="Undo">
                   <Icon d={P.undo} />
                   <span>Undo</span>
@@ -699,6 +731,9 @@ export default function PdfEditor() {
                 <button className="pe-chip" onClick={() => movePage(1)} disabled={idx >= items.length - 1} title="Move later">
                   Later <Icon d={P.right} size={15} />
                 </button>
+                <button className="pe-chip" onClick={() => setCropOpen(true)}>
+                  <Icon d={P.crop} size={15} /> Crop
+                </button>
                 <button className="pe-chip" onClick={rotatePage}>
                   <Icon d={P.rotate} size={15} /> Rotate
                 </button>
@@ -718,7 +753,7 @@ export default function PdfEditor() {
 
               <div className="pe-pages">
                 {items.map((it, n) => {
-                  const key = `${it.id}:${it.rotation}`;
+                  const key = thumbKey(it);
                   const d = dispSize(it);
                   return (
                     <button
@@ -776,6 +811,19 @@ export default function PdfEditor() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Crop the current page */}
+      {cropOpen && current && (
+        <CropEditor
+          key={current.id}
+          item={current}
+          source={sources.current.get(current.src)}
+          pageNumber={idx + 1}
+          pageCount={items.length}
+          onApply={applyCrop}
+          onCancel={() => setCropOpen(false)}
+        />
       )}
 
       {/* Name your PDF, then save */}

@@ -1454,3 +1454,70 @@ button {
   background: transparent;
   border: 1px solid currentColor;
 }
+/* ---------- PDF crop screen ---------- */
+.ce-title {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+}
+.ce-title strong {
+  font-size: 0.95rem;
+}
+.ce-title span {
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+.ce-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #fff;
+  pointer-events: none;
+}
+.ce-body {
+  position: absolute;
+  touch-action: none;
+  cursor: move;
+}
+.ce-edge {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+  touch-action: none;
+  cursor: grab;
+}
+.ce-edge::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 26px;
+  height: 6px;
+  margin: -3px 0 0 -13px;
+  border-radius: 6px;
+  background: #fff;
+  border: 2px solid #3b82f6;
+  box-sizing: content-box;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+.ce-edge.v::after {
+  width: 6px;
+  height: 26px;
+  margin: -13px 0 0 -3px;
+}
+.ce-grid line {
+  stroke: rgba(255, 255, 255, 0.55);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+.ce-size {
+  margin: 0;
+  padding: 0 20px 8px;
+  text-align: center;
+  font-size: 0.82rem;
+  color: #cbd5e1;
+}
