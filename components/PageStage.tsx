@@ -24,6 +24,7 @@ type Props = {
   penSize: number;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
+  onBegin: () => void; // called once before a change, so it can be undone
   onChange: (annots: Annot[]) => void;
   onTextRequest: (req: { id?: string; u: number; v: number; text: string }) => void;
 };
@@ -38,6 +39,7 @@ export default function PageStage({
   penSize,
   selectedId,
   onSelect,
+  onBegin,
   onChange,
   onTextRequest,
 }: Props) {
@@ -46,7 +48,12 @@ export default function PageStage({
   const overlayRef = useRef<HTMLDivElement>(null);
   const tokenRef = useRef(0);
   const startRef = useRef<[number, number]>([0, 0]);
-  const dragRef = useRef<{ id: string; start: [number, number]; orig: Annot } | null>(null);
+  const dragRef = useRef<{
+    id: string;
+    start: [number, number];
+    orig: Annot;
+    began: boolean;
+  } | null>(null);
 
   const [sw, setSw] = useState(0);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -126,7 +133,10 @@ export default function PageStage({
   function up() {
     if (!draft) return;
     const ok = draft.type === "draw" || (draft.w > 0.005 && draft.h > 0.005);
-    if (ok) onChange([...item.annots, { ...draft, id: uid() }]);
+    if (ok) {
+      onBegin();
+      onChange([...item.annots, { ...draft, id: uid() }]);
+    }
     setDraft(null);
   }
 
@@ -135,18 +145,21 @@ export default function PageStage({
     e.stopPropagation();
     onSelect(a.id);
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    dragRef.current = { id: a.id, start: pos(e), orig: a };
+    dragRef.current = { id: a.id, start: pos(e), orig: a, began: false };
   }
 
   function moveDrag(e: React.PointerEvent<Element>) {
     const g = dragRef.current;
     if (!g) return;
     const [u, v] = pos(e);
-    onChange(
-      item.annots.map((a) =>
-        a.id === g.id ? translateAnnot(g.orig, u - g.start[0], v - g.start[1]) : a
-      )
-    );
+    const du = u - g.start[0];
+    const dv = v - g.start[1];
+    if (!g.began) {
+      if (Math.abs(du) < 0.002 && Math.abs(dv) < 0.002) return; // just a tap
+      g.began = true;
+      onBegin(); // one undo step for the whole drag
+    }
+    onChange(item.annots.map((a) => (a.id === g.id ? translateAnnot(g.orig, du, dv) : a)));
   }
 
   const endDrag = () => {

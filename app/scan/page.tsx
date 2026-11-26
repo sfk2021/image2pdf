@@ -14,12 +14,16 @@ import {
   Corners,
   FilterId,
   FILTERS,
+  DECODE_MAX,
+  JPEG_QUALITY,
   NO_ADJUST,
+  OUT_MAX,
+  THUMB_SIZE,
   canvasToFile,
   loadSource,
-  renderScan,
+  makeThumb,
 } from "@/lib/scan";
-import { detectDocument, loadOpenCV } from "@/lib/opencv";
+import { scanCanvas } from "@/lib/scanWorker";
 
 // ====== LIMITS: change these if you like ======
 const MAX_IMAGES = 30;
@@ -29,7 +33,7 @@ const MAX_FILE_MB = 25;
 type PageSize = "a4" | "letter" | "fit";
 type Img = {
   id: string;
-  url: string; // preview of the current (processed) image
+  url: string; // small preview ("" until it is ready)
   file: File; // current (processed) image used in the PDF
   source: File; // untouched original, used for re-cropping
   rotation: number;
@@ -39,7 +43,15 @@ type Img = {
   scanned: boolean;
   processing: boolean;
 };
-type Job = { id: string; source: File; corners: Corners | null; scanned: boolean };
+type Job = {
+  id: string;
+  source: File;
+  corners: Corners | null;
+  detect: boolean; // find the page edges automatically
+  scan: boolean; // false = only make a preview
+  filter: FilterId;
+  adjust: Adjust;
+};
 
 const isImage = (f: File) =>
   f.type.startsWith("image/") || /\.(heic|heif)$/i.test(f.name);
@@ -51,7 +63,12 @@ const formatSize = (bytes: number) =>
 
 // Fix orientation, apply rotation, resize, flatten transparency, compress
 async function toJpeg(file: File, rotation: number, maxSize = 1800) {
-  const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  let bmp: ImageBitmap;
+  try {
+    bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  } catch {
+    bmp = await createImageBitmap(file);
+  }
   const scale = Math.min(1, maxSize / Math.max(bmp.width, bmp.height));
   const w = Math.round(bmp.width * scale);
   const h = Math.round(bmp.height * scale);
@@ -143,57 +160,89 @@ export default function ScanPage() {
   const count = images.length;
   const remaining = MAX_IMAGES - count;
   const full = remaining <= 0;
-  const processing = images.some((i) => i.processing);
+  const processingCount = images.filter((i) => i.processing).length;
+  const processing = processingCount > 0;
   const editing = images.find((i) => i.id === editingId) ?? null;
 
-  /* ----- Smart scan: runs one image at a time in the background ----- */
-  function enqueueProcess(jobs: Job[], filter: FilterId, adjust: Adjust) {
+  /* ----- Scanning: one page at a time, the heavy work runs in a worker ----- */
+  async function runJob(job: Job) {
+    try {
+      if (removedRef.current.has(job.id)) return;
+
+      let file = job.source;
+      let corners = job.corners;
+      let url = "";
+
+      if (job.scan) {
+        const src = await loadSource(job.source, DECODE_MAX);
+        const res = await scanCanvas(src, {
+          corners: job.corners,
+          detect: job.detect,
+          filter: job.filter,
+          adjust: job.adjust,
+          maxOut: OUT_MAX,
+        });
+        corners = res.corners;
+        file = await canvasToFile(res.canvas, `scan-${Date.now()}.jpg`, JPEG_QUALITY);
+        url = await makeThumb(res.canvas);
+      } else {
+        const small = await loadSource(job.source, THUMB_SIZE);
+        url = await makeThumb(small);
+      }
+
+      if (removedRef.current.has(job.id)) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      const old = imagesRef.current.find((i) => i.id === job.id);
+      if (old?.url) URL.revokeObjectURL(old.url);
+
+      setImages((prev) =>
+        prev.map((i) =>
+          i.id === job.id
+            ? {
+                ...i,
+                file,
+                url,
+                corners,
+                filter: job.filter,
+                adjust: job.adjust,
+                scanned: job.scan,
+                processing: false,
+              }
+            : i
+        )
+      );
+    } catch (e) {
+      console.error(e);
+      // keep the original photo so the page is still usable
+      let url = "";
+      try {
+        url = await makeThumb(await loadSource(job.source, THUMB_SIZE));
+      } catch {
+        /* no preview available */
+      }
+      if (removedRef.current.has(job.id)) {
+        if (url) URL.revokeObjectURL(url);
+        return;
+      }
+      setImages((prev) =>
+        prev.map((i) =>
+          i.id === job.id ? { ...i, url: i.url || url, processing: false } : i
+        )
+      );
+      setWarning(
+        "A page could not be scanned and was kept as it is. Use the crop button to fix it by hand."
+      );
+    }
+  }
+
+  function enqueue(jobs: Job[]) {
     if (!jobs.length) return;
     const ids = new Set(jobs.map((j) => j.id));
-    setImages((prev) =>
-      prev.map((i) => (ids.has(i.id) ? { ...i, processing: true } : i))
-    );
-
+    setImages((prev) => prev.map((i) => (ids.has(i.id) ? { ...i, processing: true } : i)));
     for (const job of jobs) {
-      queueRef.current = queueRef.current.then(async () => {
-        try {
-          if (removedRef.current.has(job.id)) return;
-
-          // 1) find the page edges once (needs OpenCV; skipped if offline)
-          let corners = job.corners;
-          if (!job.scanned && !corners) {
-            try {
-              const small = await loadSource(job.source, 1000);
-              const cv = await loadOpenCV();
-              corners = detectDocument(cv, small);
-            } catch {
-              corners = null;
-            }
-          }
-
-          // 2) crop, straighten, filter at full quality
-          const fullSrc = await loadSource(job.source, 2600);
-          const out = renderScan(fullSrc, corners, filter, 2000, adjust);
-          const file = await canvasToFile(out, `scan-${Date.now()}.jpg`, 0.9);
-
-          if (removedRef.current.has(job.id)) return;
-          const old = imagesRef.current.find((i) => i.id === job.id);
-          if (old) URL.revokeObjectURL(old.url);
-          const url = URL.createObjectURL(file);
-          setImages((prev) =>
-            prev.map((i) =>
-              i.id === job.id
-                ? { ...i, file, url, corners, filter, adjust, scanned: true, processing: false }
-                : i
-            )
-          );
-        } catch (e) {
-          console.error(e);
-          setImages((prev) =>
-            prev.map((i) => (i.id === job.id ? { ...i, processing: false } : i))
-          );
-        }
-      });
+      queueRef.current = queueRef.current.then(() => runJob(job));
     }
   }
 
@@ -227,7 +276,7 @@ export default function ScanPage() {
 
     const added: Img[] = valid.map((f) => ({
       id: uid(),
-      url: URL.createObjectURL(f),
+      url: "",
       file: f,
       source: f,
       rotation: 0,
@@ -241,13 +290,18 @@ export default function ScanPage() {
     if (added.length) {
       countRef.current += added.length;
       setImages((prev) => [...prev, ...added]);
-      if (scanOpts.current.autoScan) {
-        enqueueProcess(
-          added.map((a) => ({ id: a.id, source: a.source, corners: null, scanned: false })),
-          scanOpts.current.defaultFilter,
-          NO_ADJUST
-        );
-      }
+      const { autoScan: scan, defaultFilter: filter } = scanOpts.current;
+      enqueue(
+        added.map((a) => ({
+          id: a.id,
+          source: a.source,
+          corners: null,
+          detect: scan,
+          scan,
+          filter: scan ? filter : "original",
+          adjust: NO_ADJUST,
+        }))
+      );
     }
   }
 
@@ -257,7 +311,7 @@ export default function ScanPage() {
     setWarning("");
     setImages((prev) => {
       const target = prev.find((i) => i.id === id);
-      if (target) URL.revokeObjectURL(target.url);
+      if (target?.url) URL.revokeObjectURL(target.url);
       return prev.filter((i) => i.id !== id);
     });
   }
@@ -280,18 +334,24 @@ export default function ScanPage() {
 
   function applyEdit(
     id: string,
-    r: { file: File; corners: Corners; filter: FilterId; adjust: Adjust; applyAll: boolean }
+    r: {
+      file: File;
+      thumbUrl: string;
+      corners: Corners;
+      filter: FilterId;
+      adjust: Adjust;
+      applyAll: boolean;
+    }
   ) {
     const old = imagesRef.current.find((i) => i.id === id);
-    if (old) URL.revokeObjectURL(old.url);
-    const url = URL.createObjectURL(r.file);
+    if (old?.url) URL.revokeObjectURL(old.url);
     setImages((prev) =>
       prev.map((i) =>
         i.id === id
           ? {
               ...i,
               file: r.file,
-              url,
+              url: r.thumbUrl,
               corners: r.corners,
               filter: r.filter,
               adjust: r.adjust,
@@ -306,12 +366,18 @@ export default function ScanPage() {
 
     // Batch: re-process all other pages with the same filter + adjustments
     if (r.applyAll) {
-      enqueueProcess(
-        images
+      enqueue(
+        imagesRef.current
           .filter((i) => i.id !== id && !i.processing)
-          .map((i) => ({ id: i.id, source: i.source, corners: i.corners, scanned: i.scanned })),
-        r.filter,
-        r.adjust
+          .map((i) => ({
+            id: i.id,
+            source: i.source,
+            corners: i.corners,
+            detect: !i.scanned && !i.corners,
+            scan: true,
+            filter: r.filter,
+            adjust: r.adjust,
+          }))
       );
     }
   }
@@ -319,7 +385,7 @@ export default function ScanPage() {
   function clearAll() {
     images.forEach((i) => {
       removedRef.current.add(i.id);
-      URL.revokeObjectURL(i.url);
+      if (i.url) URL.revokeObjectURL(i.url);
     });
     setImages([]);
     setError("");
@@ -588,12 +654,14 @@ export default function ScanPage() {
               {images.map((img, i) => (
                 <li key={img.id} className="page-item">
                   <div className="thumb">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={img.url}
-                      alt={`Page ${i + 1}`}
-                      style={{ transform: `rotate(${img.rotation}deg)` }}
-                    />
+                    {img.url && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={img.url}
+                        alt={`Page ${i + 1}`}
+                        style={{ transform: `rotate(${img.rotation}deg)` }}
+                      />
+                    )}
                     <span className="num">{i + 1}</span>
                     {img.processing && (
                       <div className="thumb-busy">
@@ -682,7 +750,7 @@ export default function ScanPage() {
             ) : processing ? (
               <>
                 <div className="spinner" />
-                <span>Scanning pages…</span>
+                <span>Scanning pages… ({processingCount} left)</span>
               </>
             ) : (
               <>

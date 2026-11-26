@@ -6,13 +6,16 @@ import {
   Corners,
   FilterId,
   FILTERS,
+  DECODE_MAX,
+  JPEG_QUALITY,
+  OUT_MAX,
   canvasToFile,
   fullCorners,
   insetCorners,
   loadSource,
-  renderScan,
+  makeThumb,
 } from "@/lib/scan";
-import { detectDocument, loadOpenCV } from "@/lib/opencv";
+import { detectOnly, scanCanvas } from "@/lib/scanWorker";
 
 type Props = {
   source: File;
@@ -22,6 +25,7 @@ type Props = {
   canApplyAll: boolean;
   onSave: (r: {
     file: File;
+    thumbUrl: string;
     corners: Corners;
     filter: FilterId;
     adjust: Adjust;
@@ -56,8 +60,7 @@ export default function ScanEditor({
   async function autoDetect(c: HTMLCanvasElement) {
     setNote("");
     try {
-      const cv = await loadOpenCV();
-      const found = detectDocument(cv, c);
+      const found = await detectOnly(c);
       if (found) {
         setCorners(found);
       } else {
@@ -66,7 +69,7 @@ export default function ScanEditor({
       }
     } catch {
       setCorners(insetCorners());
-      setNote("Auto-detect needs an internet connection. Drag the corners manually.");
+      setNote("Auto-detect failed. Drag the corners to fit your page.");
     }
   }
 
@@ -115,14 +118,32 @@ export default function ScanEditor({
     };
   }, []);
 
-  // Live filter preview
+  // Live filter preview (runs in the worker, so sliders stay smooth)
   useEffect(() => {
-    if (tab !== "filter" || !srcRef.current || !previewRef.current) return;
-    const out = renderScan(srcRef.current, corners, filter, 700, adjust);
-    const p = previewRef.current;
-    p.width = out.width;
-    p.height = out.height;
-    p.getContext("2d")!.drawImage(out, 0, 0);
+    if (tab !== "filter" || !srcRef.current) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await scanCanvas(srcRef.current!, {
+          corners,
+          detect: false,
+          filter,
+          adjust,
+          maxOut: 800,
+        });
+        const p = previewRef.current;
+        if (cancelled || !p) return;
+        p.width = res.canvas.width;
+        p.height = res.canvas.height;
+        p.getContext("2d")!.drawImage(res.canvas, 0, 0);
+      } catch {
+        /* ignore preview errors */
+      }
+    }, 60);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [tab, corners, filter, adjust, status]);
 
   function down(e: React.PointerEvent<HTMLDivElement>) {
@@ -152,11 +173,18 @@ export default function ScanEditor({
   async function save() {
     setStatus("saving");
     try {
-      const full = await loadSource(source, 2600);
-      const out = renderScan(full, corners, filter, 2000, adjust);
+      const full = await loadSource(source, DECODE_MAX);
+      const res = await scanCanvas(full, {
+        corners,
+        detect: false,
+        filter,
+        adjust,
+        maxOut: OUT_MAX,
+      });
       const base = (source.name || "scan").replace(/\.[^.]+$/, "");
-      const file = await canvasToFile(out, `${base}-scan.jpg`, 0.9);
-      onSave({ file, corners, filter, adjust, applyAll: applyAll && canApplyAll });
+      const file = await canvasToFile(res.canvas, `${base}-scan.jpg`, JPEG_QUALITY);
+      const thumbUrl = await makeThumb(res.canvas);
+      onSave({ file, thumbUrl, corners, filter, adjust, applyAll: applyAll && canApplyAll });
     } catch {
       setNote("Could not process this image.");
       setStatus("ready");

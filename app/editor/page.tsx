@@ -47,6 +47,7 @@ const P = {
     "M9 11l-6 6v3h9l3-3 M22 12l-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4",
   cover: "M3 5h18v14H3z",
   undo: "M3 7v6h6 M3 13a9 9 0 1 0 3-7.7L3 8",
+  redo: "M21 7v6h-6 M21 13a9 9 0 1 1-3-7.7L21 8",
   trash:
     "M3 6h18 M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6 M10 11v6 M14 11v6 M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2",
   left: "M15 18l-6-6 6-6",
@@ -70,7 +71,10 @@ const TOOLS: { id: Tool; label: string; d: string }[] = [
 
 const SWATCHES = ["#111827", "#ef4444", "#2563eb", "#16a34a", "#f59e0b", "#facc15", "#ffffff"];
 
+const MAX_HISTORY = 50;
+
 type Msg = { kind: "error" | "ok" | "warn"; text: string } | null;
+type Snap = { items: PageItem[]; currentId: string | null };
 
 export default function PdfEditor() {
   const sources = useRef(new Map<string, Source>());
@@ -98,6 +102,50 @@ export default function PdfEditor() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<Msg>(null);
   const [dragOver, setDragOver] = useState(false);
+
+  // ----- Undo / redo history (covers annotations AND page operations) -----
+  const [past, setPast] = useState<Snap[]>([]);
+  const [future, setFuture] = useState<Snap[]>([]);
+  const itemsRef = useRef<PageItem[]>([]);
+  const currentIdRef = useRef<string | null>(null);
+  const sliderBegan = useRef(false);
+
+  useEffect(() => {
+    itemsRef.current = items;
+    currentIdRef.current = currentId;
+  }, [items, currentId]);
+
+  /** Save the current state as one undo step. Call it right BEFORE a change. */
+  function checkpoint() {
+    if (!itemsRef.current.length) return;
+    const snap: Snap = { items: itemsRef.current, currentId: currentIdRef.current };
+    setPast((p) => [...p.slice(-(MAX_HISTORY - 1)), snap]);
+    setFuture([]);
+  }
+
+  function restore(s: Snap) {
+    setItems(s.items);
+    setCurrentId(
+      s.items.some((i) => i.id === s.currentId) ? s.currentId : (s.items[0]?.id ?? null)
+    );
+    setSelectedId(null);
+  }
+
+  function undo() {
+    if (!past.length) return;
+    const snap = past[past.length - 1];
+    setFuture((f) => [...f, { items: itemsRef.current, currentId: currentIdRef.current }]);
+    setPast((p) => p.slice(0, -1));
+    restore(snap);
+  }
+
+  function redo() {
+    if (!future.length) return;
+    const snap = future[future.length - 1];
+    setPast((p) => [...p, { items: itemsRef.current, currentId: currentIdRef.current }]);
+    setFuture((f) => f.slice(0, -1));
+    restore(snap);
+  }
 
   const idx = items.findIndex((i) => i.id === currentId);
   const current = idx >= 0 ? items[idx] : null;
@@ -159,6 +207,7 @@ export default function PdfEditor() {
     }
 
     if (added.length) {
+      checkpoint(); // adding pages can be undone (skipped for the very first open)
       setItems((prev) => [...prev, ...added]);
       setCurrentId((prev) => prev ?? added[0].id);
     }
@@ -210,7 +259,7 @@ export default function PdfEditor() {
       ?.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
   }, [currentId]);
 
-  /* ---------- Page operations ---------- */
+  /* ---------- Page operations (each one is an undo step) ---------- */
   const patch = (id: string, fn: (i: PageItem) => PageItem) =>
     setItems((prev) => prev.map((i) => (i.id === id ? fn(i) : i)));
 
@@ -223,6 +272,7 @@ export default function PdfEditor() {
     if (idx < 0) return;
     const j = idx + dir;
     if (j < 0 || j >= items.length) return;
+    checkpoint();
     setItems((prev) => {
       const next = [...prev];
       [next[idx], next[j]] = [next[j], next[idx]];
@@ -232,6 +282,7 @@ export default function PdfEditor() {
 
   function rotatePage() {
     if (!current) return;
+    checkpoint();
     const d = dispSize(current);
     patch(current.id, (i) => ({
       ...i,
@@ -243,6 +294,7 @@ export default function PdfEditor() {
 
   function duplicatePage() {
     if (!current) return;
+    checkpoint();
     const copy: PageItem = {
       ...current,
       id: uid(),
@@ -254,6 +306,7 @@ export default function PdfEditor() {
 
   function deletePage() {
     if (!current) return;
+    checkpoint();
     const next = items[idx + 1] ?? items[idx - 1] ?? null;
     setItems((prev) => prev.filter((i) => i.id !== current.id));
     setCurrentId(next ? next.id : null);
@@ -261,6 +314,7 @@ export default function PdfEditor() {
   }
 
   function addBlank() {
+    checkpoint();
     const blank: PageItem = {
       id: uid(), src: "", index: 0, blank: true,
       w: A4.w, h: A4.h, rotation: 0, annots: [],
@@ -280,13 +334,8 @@ export default function PdfEditor() {
 
   function deleteAnnot(id: string) {
     if (!current) return;
+    checkpoint();
     patch(current.id, (i) => ({ ...i, annots: i.annots.filter((a) => a.id !== id) }));
-    setSelectedId(null);
-  }
-
-  function undo() {
-    if (!current || !current.annots.length) return;
-    patch(current.id, (i) => ({ ...i, annots: i.annots.slice(0, -1) }));
     setSelectedId(null);
   }
 
@@ -296,8 +345,12 @@ export default function PdfEditor() {
   }
 
   function pickColor(c: string) {
-    if (selected) updateAnnot(selected.id, (a) => ({ ...a, color: c }) as Annot);
-    else setColors((prev) => ({ ...prev, [tool]: c }));
+    if (selected) {
+      checkpoint();
+      updateAnnot(selected.id, (a) => ({ ...a, color: c }) as Annot);
+    } else {
+      setColors((prev) => ({ ...prev, [tool]: c }));
+    }
   }
 
   const sizeKind: "text" | "draw" | null =
@@ -315,19 +368,37 @@ export default function PdfEditor() {
     : penSize;
 
   function setSizeVal(v: number) {
-    if (selected?.type === "text") updateAnnot(selected.id, (a) => ({ ...a, size: v }) as Annot);
-    else if (selected?.type === "draw") updateAnnot(selected.id, (a) => ({ ...a, width: v }) as Annot);
-    else if (sizeKind === "text") setTextSize(v);
-    else setPenSize(v);
+    if (selected) {
+      // one undo step per slider movement, not one per tick
+      if (!sliderBegan.current) {
+        sliderBegan.current = true;
+        checkpoint();
+      }
+      if (selected.type === "text") updateAnnot(selected.id, (a) => ({ ...a, size: v }) as Annot);
+      else if (selected.type === "draw") updateAnnot(selected.id, (a) => ({ ...a, width: v }) as Annot);
+    } else if (sizeKind === "text") {
+      setTextSize(v);
+    } else {
+      setPenSize(v);
+    }
   }
+
+  const endSlider = () => {
+    sliderBegan.current = false;
+  };
 
   function submitText() {
     if (!textDlg || !current) return;
     const t = textDlg.text.replace(/\s+$/, "");
     if (textDlg.id) {
-      if (!t) deleteAnnot(textDlg.id);
-      else updateAnnot(textDlg.id, (a) => (a.type === "text" ? { ...a, text: t } : a));
+      if (!t) {
+        deleteAnnot(textDlg.id);
+      } else {
+        checkpoint();
+        updateAnnot(textDlg.id, (a) => (a.type === "text" ? { ...a, text: t } : a));
+      }
     } else if (t) {
+      checkpoint();
       const a: TextAnnot = {
         id: uid(), type: "text", u: textDlg.u, v: textDlg.v,
         text: t, size: textSize, color: colors.text,
@@ -337,12 +408,22 @@ export default function PdfEditor() {
     setTextDlg(null);
   }
 
-  // Delete key removes the selected annotation (desktop)
+  // Keyboard: Delete removes the selection, Ctrl/Cmd+Z undoes, Ctrl+Shift+Z / Ctrl+Y redoes
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || textDlg) return;
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedId) {
+      const mod = e.ctrlKey || e.metaKey;
+      const k = e.key.toLowerCase();
+
+      if (mod && k === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+      } else if (mod && k === "y") {
+        e.preventDefault();
+        redo();
+      } else if ((e.key === "Delete" || e.key === "Backspace") && selectedId) {
         e.preventDefault();
         deleteAnnot(selectedId);
       }
@@ -350,7 +431,7 @@ export default function PdfEditor() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, textDlg, currentId]);
+  }, [selectedId, textDlg, currentId, past, future]);
 
   /* ---------- Save ---------- */
   async function save() {
@@ -463,9 +544,13 @@ export default function PdfEditor() {
                   </button>
                 ))}
                 <span className="pe-sep" />
-                <button className="pe-tool" onClick={undo} disabled={!current?.annots.length}>
+                <button className="pe-tool" onClick={undo} disabled={!past.length} aria-label="Undo">
                   <Icon d={P.undo} />
                   <span>Undo</span>
+                </button>
+                <button className="pe-tool" onClick={redo} disabled={!future.length} aria-label="Redo">
+                  <Icon d={P.redo} />
+                  <span>Redo</span>
                 </button>
               </div>
 
@@ -493,6 +578,10 @@ export default function PdfEditor() {
                         step={sizeKind === "text" ? 0.002 : 0.001}
                         value={sizeVal}
                         onChange={(e) => setSizeVal(Number(e.target.value))}
+                        onPointerUp={endSlider}
+                        onPointerCancel={endSlider}
+                        onKeyUp={endSlider}
+                        onBlur={endSlider}
                       />
                     </label>
                   )}
@@ -548,6 +637,7 @@ export default function PdfEditor() {
                     penSize={penSize}
                     selectedId={selectedId}
                     onSelect={setSelectedId}
+                    onBegin={checkpoint}
                     onChange={setAnnots}
                     onTextRequest={(req) => setTextDlg(req)}
                   />

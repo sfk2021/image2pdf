@@ -10,17 +10,38 @@ type Props = {
   onFallback: () => void; // use the phone's own camera app instead
 };
 
-export default function CameraCapture({
-  count,
-  max,
-  onCapture,
-  onClose,
-  onFallback,
-}: Props) {
+async function openStream(facing: "environment" | "user") {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: facing },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
+    });
+  } catch (e) {
+    if (e instanceof DOMException && (e.name === "NotAllowedError" || e.name === "SecurityError")) {
+      throw e;
+    }
+    // some phones reject the exact constraints: try the plain camera
+    return await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+  }
+}
+
+export default function CameraCapture({ count, max, onCapture, onClose, onFallback }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const busyRef = useRef(false);
   const thumbRef = useRef("");
+
+  // Always call the latest callbacks without restarting the camera
+  const onCaptureRef = useRef(onCapture);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCaptureRef.current = onCapture;
+    onCloseRef.current = onClose;
+  });
 
   const [facing, setFacing] = useState<"environment" | "user">("environment");
   const [ready, setReady] = useState(false);
@@ -31,7 +52,7 @@ export default function CameraCapture({
 
   const full = count >= max;
 
-  // Start / restart the camera stream
+  // Start / restart the camera when the facing changes
   useEffect(() => {
     let cancelled = false;
 
@@ -46,21 +67,22 @@ export default function CameraCapture({
         return;
       }
 
+      // give the previous camera a moment to release (needed on iPhone)
+      await new Promise((r) => setTimeout(r, 150));
+      if (cancelled) return;
+
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode: { ideal: facing },
-            width: { ideal: 2560 },
-            height: { ideal: 1440 },
-          },
-        });
+        const stream = await openStream(facing);
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
         streamRef.current = stream;
-        if (videoRef.current) videoRef.current.srcObject = stream;
+        const v = videoRef.current;
+        if (v) {
+          v.srcObject = stream;
+          v.play().catch(() => {});
+        }
       } catch (e) {
         if (cancelled) return;
         const name = e instanceof DOMException ? e.name : "";
@@ -81,18 +103,24 @@ export default function CameraCapture({
     };
   }, [facing]);
 
-  // Lock page scroll, close on Escape, clean up thumbnail URL
+  // Lock page scroll and close on Escape (runs once)
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCloseRef.current();
     window.addEventListener("keydown", onKey);
     return () => {
       document.body.style.overflow = prev;
       window.removeEventListener("keydown", onKey);
+    };
+  }, []);
+
+  // Free the last thumbnail only when the camera closes
+  useEffect(() => {
+    return () => {
       if (thumbRef.current) URL.revokeObjectURL(thumbRef.current);
     };
-  }, [onClose]);
+  }, []);
 
   function shoot() {
     const v = videoRef.current;
@@ -104,28 +132,27 @@ export default function CameraCapture({
     canvas.height = v.videoHeight;
     canvas.getContext("2d")!.drawImage(v, 0, 0);
 
+    // instant feedback, before the image is encoded
+    setFlash(true);
+    setTimeout(() => setFlash(false), 150);
+    if (navigator.vibrate) navigator.vibrate(30);
+
     canvas.toBlob(
       (blob) => {
         busyRef.current = false;
         if (!blob) return;
 
-        const file = new File([blob], `photo-${Date.now()}.jpg`, {
-          type: "image/jpeg",
-        });
-        onCapture(file);
+        const file = new File([blob], `photo-${Date.now()}.jpg`, { type: "image/jpeg" });
+        onCaptureRef.current(file);
 
         if (thumbRef.current) URL.revokeObjectURL(thumbRef.current);
         const url = URL.createObjectURL(blob);
         thumbRef.current = url;
         setThumb(url);
         setShots((s) => s + 1);
-
-        setFlash(true);
-        setTimeout(() => setFlash(false), 150);
-        if (navigator.vibrate) navigator.vibrate(30);
       },
       "image/jpeg",
-      0.92
+      0.9
     );
   }
 
@@ -138,6 +165,7 @@ export default function CameraCapture({
         playsInline
         muted
         onPlaying={() => setReady(true)}
+        onLoadedData={() => setReady(true)}
       />
       {flash && <div className="cam-flash" />}
 
@@ -149,6 +177,7 @@ export default function CameraCapture({
           <button
             className="cam-round"
             onClick={() => setFacing((f) => (f === "environment" ? "user" : "environment"))}
+            disabled={!ready}
             aria-label="Switch camera"
           >
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
