@@ -1159,3 +1159,298 @@ button {
   font-size: 0.86rem;
   color: #e2e8f0;
 }
+/* ---------- Save dialog (name your PDF) ---------- */
+.sd-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 140;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  animation: sdfade 0.15s ease;
+}
+.sd-card {
+  width: 100%;
+  max-width: 420px;
+  padding: 22px 20px 18px;
+  border-radius: 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  animation: sdpop 0.2s ease;
+}
+.sd-ico {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+}
+.sd-card h3 {
+  margin: 14px 0 2px;
+  font-size: 1.25rem;
+  letter-spacing: -0.01em;
+}
+.sd-sub {
+  margin: 0 0 16px;
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+.sd-card label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.sd-card .input-wrap input {
+  font-size: 16px; /* stops iPhone from zooming when the field is focused */
+}
+.sd-warn,
+.sd-err {
+  margin: 8px 0 0;
+  font-size: 0.82rem;
+  color: var(--danger);
+}
+.sd-note {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.sd-note.center {
+  margin-top: 14px;
+  text-align: center;
+}
+.sd-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+.sd-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 14px;
+  padding: 14px;
+  font-weight: 700;
+  font-size: 1rem;
+}
+.sd-btn.ghost {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+}
+.sd-btn.primary {
+  border: 0;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  box-shadow: 0 8px 20px rgba(79, 70, 229, 0.3);
+}
+.sd-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+@keyframes sdfade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes sdpop {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes sdup {
+  from { transform: translateY(100%); }
+  to { transform: none; }
+}
+@media (max-width: 560px) {
+  .sd-modal {
+    align-items: end;
+    padding: 0;
+  }
+  .sd-card {
+    max-width: none;
+    border-radius: 24px 24px 0 0;
+    padding-bottom: calc(env(safe-area-inset-bottom) + 18px);
+    animation: sdup 0.25s ease;
+  }
+}
+
+/* ---------- Editor: document title in the top bar ---------- */
+.pe-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 4px;
+}
+.pe-title span {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pe-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.95rem;
+}
+/* ---------- PDF viewer (Open PDF) ---------- */
+.pv {
+  position: fixed;
+  inset: 0;
+  z-index: 160;
+  display: flex;
+  flex-direction: column;
+  background: #1e293b;
+  color: #fff;
+}
+.pv-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(env(safe-area-inset-top) + 10px) 12px 10px;
+  background: #0f172a;
+}
+.pv-close {
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 9px 14px;
+  font-weight: 700;
+  font-size: 0.88rem;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+}
+.pv-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pv-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.95rem;
+}
+.pv-title span {
+  font-size: 0.74rem;
+  color: #94a3b8;
+}
+.pv-zoom {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.pv-zoom button {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  font-size: 1.2rem;
+  line-height: 1;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+}
+.pv-zoom button:disabled {
+  opacity: 0.35;
+}
+.pv-zoom span {
+  min-width: 42px;
+  text-align: center;
+}
+.pv-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.pv-pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: max-content;
+  min-width: 100%;
+  padding: 12px 12px calc(env(safe-area-inset-bottom) + 28px);
+}
+.pv-page {
+  position: relative;
+  flex: none;
+  background: #fff;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+.pv-page canvas {
+  display: block;
+}
+.pv-num {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.75);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.pv-state {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  color: #cbd5e1;
+}
+.pv-state p {
+  margin: 0;
+}
+
+/* ---------- Preview button inside the save window ---------- */
+.sd-preview {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--primary);
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+.sd-preview:disabled {
+  opacity: 0.5;
+}
+
+/* ---------- Two buttons inside a notice ---------- */
+.notice-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.notice-btn.ghost {
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+}

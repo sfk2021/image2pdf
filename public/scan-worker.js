@@ -2,6 +2,13 @@
    Plain JavaScript, no imports. */
 "use strict";
 
+// Snap the page shape to A4 / Letter when it is within 4% of them.
+// Set to false if you scan things that are close to, but not exactly, these sizes.
+var SNAP_TO_PAPER = true;
+
+// Typical phone camera focal length as a fraction of the photo's longer side
+var DEFAULT_F = 0.75;
+
 var FULL = [
   { x: 0, y: 0 },
   { x: 1, y: 0 },
@@ -121,36 +128,155 @@ function polyArea(P) {
   return Math.abs(a) / 2;
 }
 
+function convexHull(pts) {
+  pts.sort(function (a, b) {
+    return a[0] - b[0] || a[1] - b[1];
+  });
+  var u = [];
+  var i;
+  for (i = 0; i < pts.length; i++) {
+    if (!i || pts[i][0] !== pts[i - 1][0] || pts[i][1] !== pts[i - 1][1]) u.push(pts[i]);
+  }
+  if (u.length < 3) return u;
+
+  var cross = function (o, a, b) {
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  };
+  var lower = [];
+  for (i = 0; i < u.length; i++) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], u[i]) <= 0) {
+      lower.pop();
+    }
+    lower.push(u[i]);
+  }
+  var upper = [];
+  for (i = u.length - 1; i >= 0; i--) {
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], u[i]) <= 0) {
+      upper.pop();
+    }
+    upper.push(u[i]);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+// Reduces a convex polygon to 4 corners by repeatedly replacing the edge that adds
+// the least area with the point where its two neighbours meet (so the result
+// wraps around the shape and the corners land on the real page corners).
+function hullToQuad(H) {
+  var v = H.slice();
+  while (v.length > 4) {
+    var n = v.length;
+    var bestI = -1;
+    var bestArea = Infinity;
+    var bestX = null;
+
+    for (var i = 0; i < n; i++) {
+      var P = v[(i + n - 1) % n];
+      var A = v[i];
+      var B = v[(i + 1) % n];
+      var N = v[(i + 2) % n];
+
+      var d1x = A[0] - P[0], d1y = A[1] - P[1];
+      var d2x = B[0] - N[0], d2y = B[1] - N[1];
+      var den = d1x * d2y - d1y * d2x;
+      if (Math.abs(den) < 1e-9) continue;
+
+      var npx = N[0] - P[0], npy = N[1] - P[1];
+      var t = (npx * d2y - npy * d2x) / den;
+      var s = (npx * d1y - npy * d1x) / den;
+      if (t <= 1 || s <= 1) continue; // the two edges don't meet beyond this edge
+
+      var X = [P[0] + t * d1x, P[1] + t * d1y];
+      var area = Math.abs((X[0] - A[0]) * (B[1] - A[1]) - (X[1] - A[1]) * (B[0] - A[0])) / 2;
+      if (area < bestArea) {
+        bestArea = area;
+        bestI = i;
+        bestX = X;
+      }
+    }
+
+    if (bestI < 0) {
+      // no edge can be replaced: drop the vertex that changes the shape the least
+      var minA = Infinity;
+      var minI = 0;
+      for (var j = 0; j < n; j++) {
+        var a = v[(j + n - 1) % n], b = v[j], c = v[(j + 1) % n];
+        var ar = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) / 2;
+        if (ar < minA) {
+          minA = ar;
+          minI = j;
+        }
+      }
+      v.splice(minI, 1);
+      continue;
+    }
+
+    var ia = bestI;
+    var ib = (bestI + 1) % n;
+    if (ib > ia) {
+      v.splice(ia, 2, bestX);
+    } else {
+      v.splice(ia, 1);
+      v.splice(0, 1, bestX);
+    }
+  }
+  return v.length === 4 ? v : null;
+}
+
+// Orders 4 corners as top-left, top-right, bottom-right, bottom-left
+function orderCorners(q) {
+  var cx = 0, cy = 0, i;
+  for (i = 0; i < 4; i++) {
+    cx += q[i][0] / 4;
+    cy += q[i][1] / 4;
+  }
+  // ascending angle on screen = clockwise
+  var a = q.slice().sort(function (p, r) {
+    return Math.atan2(p[1] - cy, p[0] - cx) - Math.atan2(r[1] - cy, r[0] - cx);
+  });
+  // the top edge is the one with the smallest middle y
+  var best = 0;
+  var bestY = Infinity;
+  for (i = 0; i < 4; i++) {
+    var my = (a[i][1] + a[(i + 1) % 4][1]) / 2;
+    if (my < bestY) {
+      bestY = my;
+      best = i;
+    }
+  }
+  return [a[best], a[(best + 1) % 4], a[(best + 2) % 4], a[(best + 3) % 4]];
+}
+
 // Largest blob in the mask -> four corner points, or null if it doesn't look like a page
 function largestQuad(mask, w, h) {
   var total = w * h;
   var visited = new Uint8Array(total);
   var stack = new Int32Array(total);
-  var best = null;
+  var curMin = new Int32Array(h);
+  var curMax = new Int32Array(h);
+  var bestMin = null;
+  var bestMax = null;
+  var bestCnt = 0;
 
   for (var s = 0; s < total; s++) {
     if (!mask[s] || visited[s]) continue;
 
+    curMin.fill(0x7fffffff);
+    curMax.fill(-1);
     var sp = 0;
     stack[sp++] = s;
     visited[s] = 1;
-
     var cnt = 0;
-    var minSum = Infinity, maxSum = -Infinity, minDiff = Infinity, maxDiff = -Infinity;
-    var tl = null, br = null, tr = null, bl = null;
 
     while (sp) {
       var p = stack[--sp];
       var px = p % w;
       var py = (p / w) | 0;
       cnt++;
-
-      var sum = px + py;
-      var diff = px - py;
-      if (sum < minSum) { minSum = sum; tl = [px, py]; }
-      if (sum > maxSum) { maxSum = sum; br = [px, py]; }
-      if (diff > maxDiff) { maxDiff = diff; tr = [px, py]; }
-      if (diff < minDiff) { minDiff = diff; bl = [px, py]; }
+      if (px < curMin[py]) curMin[py] = px;
+      if (px > curMax[py]) curMax[py] = px;
 
       if (px > 0 && mask[p - 1] && !visited[p - 1]) { visited[p - 1] = 1; stack[sp++] = p - 1; }
       if (px < w - 1 && mask[p + 1] && !visited[p + 1]) { visited[p + 1] = 1; stack[sp++] = p + 1; }
@@ -158,30 +284,45 @@ function largestQuad(mask, w, h) {
       if (py < h - 1 && mask[p + w] && !visited[p + w]) { visited[p + w] = 1; stack[sp++] = p + w; }
     }
 
-    if (!best || cnt > best.cnt) best = { cnt: cnt, tl: tl, tr: tr, br: br, bl: bl };
+    if (cnt > bestCnt) {
+      bestCnt = cnt;
+      bestMin = curMin.slice();
+      bestMax = curMax.slice();
+    }
   }
 
-  if (!best) return null;
-  if (best.cnt < 0.12 * total || best.cnt > 0.97 * total) return null;
+  if (!bestMin) return null;
+  if (bestCnt < 0.12 * total || bestCnt > 0.97 * total) return null;
 
-  var P = [
-    [best.tl[0], best.tl[1]],
-    [best.tr[0] + 1, best.tr[1]],
-    [best.br[0] + 1, best.br[1] + 1],
-    [best.bl[0], best.bl[1] + 1],
-  ];
-  var qa = polyArea(P);
+  // Row extremes are enough to build the exact convex hull of the blob
+  var pts = [];
+  for (var y = 0; y < h; y++) {
+    if (bestMax[y] < 0) continue;
+    var x0 = bestMin[y];
+    var x1 = bestMax[y] + 1;
+    pts.push([x0, y], [x0, y + 1], [x1, y], [x1, y + 1]);
+  }
+  var hull = convexHull(pts);
+  if (hull.length < 4) return null;
+
+  var quad = hullToQuad(hull);
+  if (!quad) return null;
+
+  var i;
+  for (i = 0; i < 4; i++) {
+    quad[i][0] = Math.min(w, Math.max(0, quad[i][0]));
+    quad[i][1] = Math.min(h, Math.max(0, quad[i][1]));
+  }
+
+  var qa = polyArea(quad);
   if (qa < 0.12 * total) return null;
+  var solidity = bestCnt / qa;
+  if (solidity < 0.75 || solidity > 1.15) return null;
 
-  var solidity = best.cnt / qa;
-  if (solidity < 0.78 || solidity > 1.2) return null;
-
-  var clamp01 = function (n) { return Math.min(1, Math.max(0, n)); };
+  var o = orderCorners(quad);
   var corners = [];
-  for (var i = 0; i < 4; i++) {
-    corners.push({ x: clamp01(P[i][0] / w), y: clamp01(P[i][1] / h) });
-  }
-  return { corners: corners, score: Math.min(solidity, 1) * (best.cnt / total) };
+  for (i = 0; i < 4; i++) corners.push({ x: o[i][0] / w, y: o[i][1] / h });
+  return { corners: corners, score: Math.min(solidity, 1) * (bestCnt / total) };
 }
 
 function detectCorners(data, w, h) {
@@ -226,8 +367,9 @@ function detectCorners(data, w, h) {
   return best ? best.corners : null;
 }
 
-/* ---------------- Perspective warp ---------------- */
+/* ---------------- Perspective-correct page shape ---------------- */
 
+// Gauss-Jordan solve of an n x n system (modifies A)
 function solve(A, b) {
   var n = b.length;
   var i, r, c, col;
@@ -252,6 +394,61 @@ function solve(A, b) {
   return out;
 }
 
+// Real width / height of the page, from how its four corners look in the photo.
+// P = corners in pixels (top-left, top-right, bottom-right, bottom-left).
+// Returns 0 if it can't be worked out.
+function pageAspect(P, sw, sh) {
+  var L = Math.max(sw, sh);
+  var cx = sw / 2;
+  var cy = sh / 2;
+  var m1 = [P[0].x - cx, P[0].y - cy]; // top-left
+  var m2 = [P[1].x - cx, P[1].y - cy]; // top-right
+  var m4 = [P[2].x - cx, P[2].y - cy]; // bottom-right
+  var m3 = [P[3].x - cx, P[3].y - cy]; // bottom-left
+
+  // depth of each corner, relative to the top-left corner
+  var lam = solve(
+    [
+      [m2[0], m3[0], -m4[0]],
+      [m2[1], m3[1], -m4[1]],
+      [1, 1, -1],
+    ],
+    [m1[0], m1[1], 1]
+  );
+  if (!lam) return 0;
+  var l2 = lam[0];
+  var l3 = lam[1];
+  var l4 = lam[2];
+  if (!(l2 > 0 && l3 > 0 && l4 > 0)) return 0;
+
+  // page edges (top-left -> top-right, top-left -> bottom-left) in camera space
+  var n2 = [l2 * m2[0] - m1[0], l2 * m2[1] - m1[1], l2 - 1];
+  var n3 = [l3 * m3[0] - m1[0], l3 * m3[1] - m1[1], l3 - 1];
+
+  // focal length: assume a typical phone, refine it when the photo allows
+  var f = DEFAULT_F * L;
+  if (Math.abs(n2[2]) > 0.03 && Math.abs(n3[2]) > 0.03) {
+    var f2 = -(n2[0] * n3[0] + n2[1] * n3[1]) / (n2[2] * n3[2]);
+    if (f2 > 0) {
+      var fe = Math.sqrt(f2);
+      if (fe > 0.5 * L && fe < 1.3 * L) f = fe;
+    }
+  }
+
+  var wl = Math.sqrt((n2[0] * n2[0] + n2[1] * n2[1]) / (f * f) + n2[2] * n2[2]);
+  var hl = Math.sqrt((n3[0] * n3[0] + n3[1] * n3[1]) / (f * f) + n3[2] * n3[2]);
+  if (!(wl > 0) || !(hl > 0)) return 0;
+  return wl / hl;
+}
+
+function snapRatio(r) {
+  var known = [1 / Math.SQRT2, Math.SQRT2, 8.5 / 11, 11 / 8.5]; // A4 and Letter, portrait + landscape
+  for (var i = 0; i < known.length; i++) {
+    if (Math.abs(r / known[i] - 1) < 0.04) return known[i];
+  }
+  return r;
+}
+
 // maps dst-space points to src-space points
 function homography(dst, src) {
   var A = [];
@@ -272,8 +469,16 @@ function warp(src, sw, sh, corners, maxOut) {
   for (i = 0; i < 4; i++) P.push({ x: corners[i].x * sw, y: corners[i].y * sh });
 
   var dist = function (a, b) { return Math.hypot(a.x - b.x, a.y - b.y); };
-  var ow = Math.max(dist(P[0], P[1]), dist(P[3], P[2]));
-  var oh = Math.max(dist(P[0], P[3]), dist(P[1], P[2]));
+  var Lh = Math.max(dist(P[0], P[1]), dist(P[3], P[2])); // longest horizontal edge
+  var Lv = Math.max(dist(P[0], P[3]), dist(P[1], P[2])); // longest vertical edge
+
+  // true page shape (not the stretched shape seen in the photo)
+  var ratio = pageAspect(P, sw, sh);
+  if (!(ratio > 0.05 && ratio < 20)) ratio = Lh / Math.max(Lv, 1);
+  if (SNAP_TO_PAPER) ratio = snapRatio(ratio);
+
+  var ow = Math.max(Lh, Lv * ratio);
+  var oh = ow / ratio;
   var k = Math.min(1, maxOut / Math.max(ow, oh, 1));
   ow = Math.max(2, Math.round(ow * k));
   oh = Math.max(2, Math.round(oh * k));

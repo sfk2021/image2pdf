@@ -3,12 +3,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { jsPDF } from "jspdf";
-import { savePdf } from "@/lib/savePdf";
+import { saveBytes } from "@/lib/saveBytes";
+import { defaultName } from "@/lib/fileName";
 import { setPendingPdf } from "@/lib/pdfStore";
 import { uid } from "@/lib/uid";
 import AppNav from "@/components/AppNav";
 import CameraCapture from "@/components/CameraCapture";
 import ScanEditor from "@/components/ScanEditor";
+import SaveDialog from "@/components/SaveDialog";
+import PdfViewer from "@/components/PdfViewer";
 import {
   Adjust,
   Corners,
@@ -52,6 +55,11 @@ type Job = {
   filter: FilterId;
   adjust: Adjust;
 };
+type Ready = { bytes: Uint8Array; pages: number; sig: string; name: string };
+
+// Identifies the exact pages + rotations a PDF was built from
+const sigOf = (list: Img[]) =>
+  list.map((i) => `${i.id}:${i.file.size}:${i.rotation}`).join("|");
 
 const isImage = (f: File) =>
   f.type.startsWith("image/") || /\.(heic|heif)$/i.test(f.name);
@@ -133,8 +141,12 @@ export default function ScanPage() {
   const [warning, setWarning] = useState("");
   const [success, setSuccess] = useState(false);
   const [lastPdf, setLastPdf] = useState<{ name: string; bytes: Uint8Array } | null>(null);
+  const [ready, setReady] = useState<Ready | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [writing, setWriting] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [viewer, setViewer] = useState<{ bytes: Uint8Array; title: string } | null>(null);
   const [pageSize, setPageSize] = useState<PageSize>("a4");
-  const [fileName, setFileName] = useState("scan");
   const [cameraOpen, setCameraOpen] = useState(false);
   const [autoScan, setAutoScan] = useState(true);
   const [defaultFilter, setDefaultFilter] = useState<FilterId>("magic");
@@ -163,6 +175,10 @@ export default function ScanPage() {
   const processingCount = images.filter((i) => i.processing).length;
   const processing = processingCount > 0;
   const editing = images.find((i) => i.id === editingId) ?? null;
+
+  // A built PDF is only valid while the pages stay exactly the same
+  const pagesSig = sigOf(images);
+  const readyNow = ready && ready.sig === pagesSig ? ready : null;
 
   /* ----- Scanning: one page at a time, the heavy work runs in a worker ----- */
   async function runJob(job: Job) {
@@ -393,12 +409,16 @@ export default function ScanPage() {
     setSuccess(false);
   }
 
+  /* ----- Step 1: build the PDF, then ask for a name ----- */
   async function createPdf() {
     if (!images.length || processing) return;
     setBusy(true);
     setProgress(0);
     setError("");
     setSuccess(false);
+    setReady(null);
+    setDialogOpen(false);
+    setSaveError("");
 
     try {
       const margin = pageSize === "fit" ? 0 : 10;
@@ -438,11 +458,14 @@ export default function ScanPage() {
       }
 
       if (pdf) {
-        const safe = fileName.trim().replace(/[^\w\- ]+/g, "") || "scan";
-        const buf = pdf.output("arraybuffer");
-        await savePdf(pdf, `${safe}.pdf`);
-        setLastPdf({ name: safe, bytes: new Uint8Array(buf) });
-        setSuccess(true);
+        const bytes = new Uint8Array(pdf.output("arraybuffer"));
+        setReady({
+          bytes,
+          pages: images.length,
+          sig: sigOf(images),
+          name: defaultName("scan"),
+        });
+        setDialogOpen(true); // ask the person to name the file
       }
     } catch (e) {
       console.error(e);
@@ -451,6 +474,28 @@ export default function ScanPage() {
       );
     } finally {
       setBusy(false);
+    }
+  }
+
+  /* ----- Step 2: the person typed a name and tapped Save ----- */
+  async function confirmSave(name: string) {
+    if (!readyNow) return;
+    setWriting(true);
+    setSaveError("");
+    try {
+      const ok = await saveBytes(readyNow.bytes, `${name}.pdf`);
+      if (ok) {
+        setLastPdf({ name, bytes: readyNow.bytes });
+        setSuccess(true);
+        setDialogOpen(false);
+        setReady(null);
+      }
+      // if the share sheet was cancelled, keep the window open so they can try again
+    } catch (e) {
+      console.error(e);
+      setSaveError("Could not save the file. Please try again.");
+    } finally {
+      setWriting(false);
     }
   }
 
@@ -590,12 +635,40 @@ export default function ScanPage() {
         {/* Messages */}
         {warning && <div className="notice warn">⚠️ {warning}</div>}
         {error && <div className="notice error">❌ {error}</div>}
-        {success && lastPdf && (
+
+        {readyNow && !dialogOpen && (
           <div className="notice ok ok-row">
-            <span>✅ Your PDF is ready and was saved.</span>
-            <button type="button" className="notice-btn" onClick={editPdf}>
-              Edit this PDF →
-            </button>
+            <span>✅ Your PDF is ready.</span>
+            <div className="notice-btns">
+              <button
+                type="button"
+                className="notice-btn ghost"
+                onClick={() => setViewer({ bytes: readyNow.bytes, title: "PDF preview" })}
+              >
+                Open PDF
+              </button>
+              <button type="button" className="notice-btn" onClick={() => setDialogOpen(true)}>
+                Name &amp; save
+              </button>
+            </div>
+          </div>
+        )}
+
+        {success && lastPdf && !readyNow && (
+          <div className="notice ok ok-row">
+            <span>✅ Saved as {lastPdf.name}.pdf</span>
+            <div className="notice-btns">
+              <button
+                type="button"
+                className="notice-btn ghost"
+                onClick={() => setViewer({ bytes: lastPdf.bytes, title: `${lastPdf.name}.pdf` })}
+              >
+                Open PDF
+              </button>
+              <button type="button" className="notice-btn" onClick={editPdf}>
+                Edit this PDF →
+              </button>
+            </div>
           </div>
         )}
 
@@ -615,20 +688,9 @@ export default function ScanPage() {
                 </button>
               ))}
             </div>
-            <div className="field">
-              <label htmlFor="fname">File name</label>
-              <div className="input-wrap">
-                <input
-                  id="fname"
-                  value={fileName}
-                  onChange={(e) => setFileName(e.target.value)}
-                  placeholder="scan"
-                  maxLength={60}
-                  disabled={busy}
-                />
-                <span>.pdf</span>
-              </div>
-            </div>
+            <p className="limit-note" style={{ marginTop: 12 }}>
+              You’ll name the file after tapping Create PDF.
+            </p>
           </section>
         )}
 
@@ -792,6 +854,29 @@ export default function ScanPage() {
           onSave={(r) => applyEdit(editing.id, r)}
           onCancel={() => setEditingId(null)}
         />
+      )}
+
+      {/* Name your PDF, then save */}
+      {dialogOpen && readyNow && (
+        <SaveDialog
+          defaultName={readyNow.name}
+          detail={`${readyNow.pages} ${readyNow.pages === 1 ? "page" : "pages"} · ${formatSize(
+            readyNow.bytes.length
+          )}`}
+          saving={writing}
+          error={saveError}
+          onSave={confirmSave}
+          onPreview={() => setViewer({ bytes: readyNow.bytes, title: "PDF preview" })}
+          onCancel={() => {
+            setDialogOpen(false);
+            setSaveError("");
+          }}
+        />
+      )}
+
+      {/* PDF viewer (on top of everything) */}
+      {viewer && (
+        <PdfViewer bytes={viewer.bytes} title={viewer.title} onClose={() => setViewer(null)} />
       )}
     </>
   );

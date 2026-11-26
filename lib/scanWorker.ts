@@ -29,7 +29,7 @@ function failAll(message: string) {
 
 function getWorker(): Worker {
   if (worker) return worker;
-  const w = new Worker("/scan-worker.js");
+  const w = new Worker("/scan-worker.js?v=3");
 
   w.onmessage = (e: MessageEvent<Reply>) => {
     const p = pending.get(e.data.id);

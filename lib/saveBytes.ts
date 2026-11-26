@@ -11,7 +11,8 @@ function toBase64(bytes: Uint8Array) {
   return btoa(bin);
 }
 
-export async function saveBytes(bytes: Uint8Array, fileName: string) {
+/** Saves or shares a PDF. Returns false if the person cancelled the share sheet. */
+export async function saveBytes(bytes: Uint8Array, fileName: string): Promise<boolean> {
   // Native app (Capacitor): save the file, then open the share sheet
   if (Capacitor.isNativePlatform()) {
     const file = await Filesystem.writeFile({
@@ -19,8 +20,13 @@ export async function saveBytes(bytes: Uint8Array, fileName: string) {
       data: toBase64(bytes),
       directory: Directory.Cache,
     });
-    await Share.share({ title: fileName, url: file.uri });
-    return;
+    try {
+      await Share.share({ title: fileName, url: file.uri });
+      return true;
+    } catch (e) {
+      if (/cancel/i.test(String((e as Error)?.message))) return false;
+      throw e;
+    }
   }
 
   const blob = new Blob([bytes.slice().buffer as ArrayBuffer], {
@@ -32,9 +38,10 @@ export async function saveBytes(bytes: Uint8Array, fileName: string) {
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
       await navigator.share({ files: [file], title: fileName });
-      return;
+      return true;
     } catch (e) {
-      if (e instanceof DOMException && e.name === "AbortError") return;
+      if (e instanceof DOMException && e.name === "AbortError") return false;
+      // anything else: fall through to a normal download
     }
   }
 
@@ -47,4 +54,5 @@ export async function saveBytes(bytes: Uint8Array, fileName: string) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
+  return true;
 }

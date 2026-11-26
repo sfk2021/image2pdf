@@ -4,9 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import AppNav from "@/components/AppNav";
 import PageStage from "@/components/PageStage";
+import SaveDialog from "@/components/SaveDialog";
+import PdfViewer from "@/components/PdfViewer";
 import { getPdfjs } from "@/lib/pdfjs";
 import { takePendingPdf } from "@/lib/pdfStore";
 import { saveBytes } from "@/lib/saveBytes";
+import { defaultName } from "@/lib/fileName";
 import { uid } from "@/lib/uid";
 import {
   A4,
@@ -73,8 +76,14 @@ const SWATCHES = ["#111827", "#ef4444", "#2563eb", "#16a34a", "#f59e0b", "#facc1
 
 const MAX_HISTORY = 50;
 
+const formatSize = (bytes: number) =>
+  bytes > 1024 * 1024
+    ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+
 type Msg = { kind: "error" | "ok" | "warn"; text: string } | null;
 type Snap = { items: PageItem[]; currentId: string | null };
+type Ready = { bytes: Uint8Array; pages: number; name: string };
 
 export default function PdfEditor() {
   const sources = useRef(new Map<string, Source>());
@@ -99,7 +108,12 @@ export default function PdfEditor() {
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [fileName, setFileName] = useState("edited");
   const [loading, setLoading] = useState("");
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState(false); // building the PDF
+  const [writing, setWriting] = useState(false); // saving / sharing the file
+  const [ready, setReady] = useState<Ready | null>(null);
+  const [savedPdf, setSavedPdf] = useState<{ name: string; bytes: Uint8Array } | null>(null);
+  const [viewer, setViewer] = useState<{ bytes: Uint8Array; title: string } | null>(null);
+  const [saveError, setSaveError] = useState("");
   const [msg, setMsg] = useState<Msg>(null);
   const [dragOver, setDragOver] = useState(false);
 
@@ -412,7 +426,7 @@ export default function PdfEditor() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || textDlg) return;
+      if (tag === "INPUT" || tag === "TEXTAREA" || textDlg || ready || viewer) return;
       const mod = e.ctrlKey || e.metaKey;
       const k = e.key.toLowerCase();
 
@@ -431,26 +445,50 @@ export default function PdfEditor() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, textDlg, currentId, past, future]);
+  }, [selectedId, textDlg, ready, viewer, currentId, past, future]);
 
-  /* ---------- Save ---------- */
+  /* ---------- Save: build the PDF, then ask for a name ---------- */
   async function save() {
     if (!items.length) return;
     setSaving(true);
     setMsg(null);
+    setSaveError("");
     try {
       const bytes = await buildPdf(items, sources.current);
-      const safe = fileName.trim().replace(/[^\w\- ]+/g, "") || "edited";
-      await saveBytes(bytes, `${safe}.pdf`);
-      setMsg({ kind: "ok", text: "Your edited PDF was saved." });
+      setReady({
+        bytes,
+        pages: items.length,
+        name: fileName === "edited" ? defaultName("edited") : fileName,
+      });
     } catch (e) {
       console.error(e);
       setMsg({
         kind: "error",
-        text: "Could not save the PDF. If it keeps failing, try removing very large pages or reopening the file.",
+        text: "Could not prepare the PDF. If it keeps failing, try removing very large pages or reopening the file.",
       });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function confirmSave(name: string) {
+    if (!ready) return;
+    setWriting(true);
+    setSaveError("");
+    try {
+      const ok = await saveBytes(ready.bytes, `${name}.pdf`);
+      if (ok) {
+        setFileName(name);
+        setSavedPdf({ name, bytes: ready.bytes });
+        setMsg({ kind: "ok", text: `Saved as ${name}.pdf` });
+        setReady(null);
+      }
+      // if the share sheet was cancelled, keep the window open so they can try again
+    } catch (e) {
+      console.error(e);
+      setSaveError("Could not save the file. Please try again.");
+    } finally {
+      setWriting(false);
     }
   }
 
@@ -511,23 +549,30 @@ export default function PdfEditor() {
         <div className="pe">
           {/* Top bar */}
           <div className="pe-head">
-            <div className="input-wrap pe-name">
-              <input
-                value={fileName}
-                onChange={(e) => setFileName(e.target.value)}
-                maxLength={60}
-                aria-label="File name"
-                disabled={saving}
-              />
-              <span>.pdf</span>
+            <div className="pe-title" title={`${fileName}.pdf`}>
+              <span>Editing</span>
+              <strong>{fileName}.pdf</strong>
             </div>
-            <button className="pe-primary" onClick={save} disabled={saving}>
+            <button className="pe-primary" onClick={save} disabled={saving || writing}>
               {saving ? <div className="spinner" /> : <Icon d={P.save} />}
-              <span>{saving ? "Saving…" : "Save PDF"}</span>
+              <span>{saving ? "Preparing…" : "Save PDF"}</span>
             </button>
           </div>
 
-          {msg && <div className={`notice ${msg.kind}`}>{msg.text}</div>}
+          {msg && (
+            <div className={`notice ${msg.kind}${msg.kind === "ok" && savedPdf ? " ok-row" : ""}`}>
+              <span>{msg.text}</span>
+              {msg.kind === "ok" && savedPdf && (
+                <button
+                  type="button"
+                  className="notice-btn"
+                  onClick={() => setViewer({ bytes: savedPdf.bytes, title: `${savedPdf.name}.pdf` })}
+                >
+                  Open PDF
+                </button>
+              )}
+            </div>
+          )}
 
           <div className="pe-body">
             {/* Main: tools + page */}
@@ -731,6 +776,29 @@ export default function PdfEditor() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Name your PDF, then save */}
+      {ready && (
+        <SaveDialog
+          defaultName={ready.name}
+          detail={`${ready.pages} ${ready.pages === 1 ? "page" : "pages"} · ${formatSize(
+            ready.bytes.length
+          )}`}
+          saving={writing}
+          error={saveError}
+          onSave={confirmSave}
+          onPreview={() => setViewer({ bytes: ready.bytes, title: "PDF preview" })}
+          onCancel={() => {
+            setReady(null);
+            setSaveError("");
+          }}
+        />
+      )}
+
+      {/* PDF viewer (on top of everything) */}
+      {viewer && (
+        <PdfViewer bytes={viewer.bytes} title={viewer.title} onClose={() => setViewer(null)} />
       )}
     </>
   );
